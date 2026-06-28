@@ -106,7 +106,7 @@ $$\text{Cost of legging out} = 7401.25 - 7340.00 = 61.25 \text{ points}$$
 
 But the market maker only collected the spread ask it sold:
 
-$$\text{P\&L} = 60.75 - 61.25 = -0.50 \text{ points} = -0.50 \times \$50 = \boxed{-\$25 \text{ per contract}}$$
+$$\text{P\\&L} = 60.75 - 61.25 = -0.50 \text{ points} = -0.50 \times \$50 = \boxed{-\$25 \text{ per contract}}$$
 
 ### The punchline
 
