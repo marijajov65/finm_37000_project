@@ -43,17 +43,6 @@ We begin with the **E-mini S&P 500 (ES) calendar spread** (e.g. ESM6–ESU6) as 
 
 The instruments we intend to explore are *futures* calendar spreads (one order, both legs). They are distinct from **Calendar Spread Options (CSOs)** — options written on the spread — which CME also lists but which are outside this project's scope.
 
-### Tick size heterogeneity between spreads and outrights
-
-While products within an asset class often share structural characteristics—such as the quarterly roll cycle in equity indices—the tick size relationship between the exchange-listed calendar spread and its underlying outright legs is not uniform. For example, the ES calendar spread trades in highly compressed 0.05-point increments against its 0.25-point outright legs, whereas the E-mini Dow (YM) calendar spread and its outrights both quote in identical 1.00-point ticks.
-
-This heterogeneity directly impacts our core research objectives by altering the market maker's baseline economics:
-
-1. **Magnified Legging Deficits:** When a spread is quoted at a severely compressed tick relative to the outrights, the premium collected for providing liquidity on the spread shrinks, while the mechanical cost to cross the outright books remains wide. Modeling this specific deficit is crucial for Goal 1, as products with highly compressed spread ticks will empirically require disproportionately larger exchange rebates to sustain persistent, two-sided quotes.
-2. **Constraints on Quoting Strategy:** The relationship between the spread tick and outright tick dictates the boundaries of risk management. Because the structural legging disadvantage varies by product, it establishes a hard constraint on how aggressively a market maker can quote the deferred leg and the spread. Capturing this tick dynamic is a prerequisite for formulating a sound, empirically-driven market-making strategy that consistently prices the joint book across linked markets, as pursued in Goal 2.
-
-To address this structurally across the CME complex, our model does not assume a fixed tick ratio. Instead, we will construct a configuration matrix that defines the exact outright tick size, spread tick size, and contract multiplier for every product in scope. This maps all varying point values—whether from equity indices, metals, or fractionally-quoted rates—into a standardized dollar-per-contract expected P&L metric. By dollar-normalizing the outputs, the model isolates the true economic legging cost and allows us to empirically evaluate exchange rebate efficacy and quoting thresholds across entirely different tick regimes.
-
 
 ## Motivation
 
