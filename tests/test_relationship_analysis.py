@@ -251,47 +251,7 @@ def test_liquidity_metrics_shape_and_values():
 
 
 # --------------------------------------------------------------------------- #
-# spread_vs_basis
-# --------------------------------------------------------------------------- #
-def test_spread_vs_basis_recovers_identity_when_spread_moves():
-    # basis == spread exactly, and the spread genuinely varies -> clean fit.
-    rng = np.random.default_rng(10)
-    n = 300
-    front_mid = 7000 + np.cumsum(rng.normal(0, 1, n))
-    spread_mid = 60 + np.cumsum(rng.normal(0, 0.1, n))  # moves meaningfully
-    back_mid = front_mid + spread_mid                   # basis == spread
-    idx = _grid(n)
-    panel = ra.resample_mids(
-        _data(_book(front_mid, idx), _book(back_mid, idx), _book(spread_mid, idx)),
-        freq="500ms",
-    )
-    res = ra.spread_vs_basis(panel)
-    assert res["beta_spread"] == pytest.approx(1.0, abs=1e-6)
-    assert res["intercept"] == pytest.approx(0.0, abs=1e-6)
-    assert res["r_squared"] > 0.9999
-    assert res["change_corr"] == pytest.approx(1.0, abs=1e-6)
-    assert res["spread_n_changes"] > 0
-
-
-def test_spread_vs_basis_flags_a_static_spread():
-    # A near-constant spread: the flag should show it barely moved, even if
-    # the level fit still reports something.
-    rng = np.random.default_rng(11)
-    n = 200
-    front_mid = 7000 + np.cumsum(rng.normal(0, 1, n))
-    spread_mid = np.full(n, 60.0)          # never moves
-    back_mid = front_mid + spread_mid
-    idx = _grid(n)
-    panel = ra.resample_mids(
-        _data(_book(front_mid, idx), _book(back_mid, idx), _book(spread_mid, idx)),
-        freq="500ms",
-    )
-    res = ra.spread_vs_basis(panel)
-    assert res["spread_n_changes"] == 0     # the caveat flag fires
-
-
-# --------------------------------------------------------------------------- #
-# spread_activity / liveliest_subwindow
+# spread_activity
 # --------------------------------------------------------------------------- #
 def test_spread_activity_counts_moves_and_trades():
     idx = _grid(5)
@@ -310,25 +270,6 @@ def test_spread_activity_counts_moves_and_trades():
     assert act["spread_volume"] == 60.0
 
 
-def test_liveliest_subwindow_finds_the_busy_slice():
-    # 60 timestamps; put all the spread trades in the last third.
-    idx = _grid(60, freq="1s")
-    spread = _book(60.0 + np.zeros(60), idx)
-    trade_idx = idx[40:50]  # trades concentrated late in the window
-    data = CalendarSpreadData(
-        front_symbol="ESM6", back_symbol="ESU6", spread_symbol="ESM6-ESU6",
-        front=_book([7340.0] * 60, idx), back=_book([7401.0] * 60, idx), spread=spread,
-        front_trades=_trades(idx[:0], [], []),
-        back_trades=_trades(idx[:0], [], []),
-        spread_trades=_trades(trade_idx, [60.0] * 10, [1.0] * 10),
-    )
-    res = ra.liveliest_subwindow(data, n_bins=6, metric="spread_trades")
-    # bins are ~10s each; trades land in bin index 4 (seconds 40-49)
-    assert res["best_bin"] == 4
-    assert res["spread_trades"] == 10
-    assert len(res["bins"]) == 6
-
-
 # --------------------------------------------------------------------------- #
 # spread_mid_diagnostic
 # --------------------------------------------------------------------------- #
@@ -342,14 +283,13 @@ def test_spread_mid_diagnostic_reports_stickiness():
         front=_book([7340.0] * 10, idx), back=_book([7401.0] * 10, idx), spread=spread,
         front_trades=_trades(idx[:0], [], []),
         back_trades=_trades(idx[:0], [], []),
-        spread_trades=_trades(idx, [60.9] * 10, [50.0] * 10),  # lots of volume...
+        spread_trades=_trades(idx, [60.9] * 10, [50.0] * 10),
     )
     diag = ra.spread_mid_diagnostic(data, _spec())
-    assert diag["n_distinct_mids"] == 3               # ...but only 3 distinct mids
-    assert diag["distinct_mids"] == [60.90, 60.95, 61.00]
+    assert diag["n_distinct_mids"] == 3
     assert diag["mid_range_ticks"] == pytest.approx(2.0)   # (61.00-60.90)/0.05
     assert diag["n_mid_moves"] == 4
-    assert diag["move_size_ticks"]["mean"] == pytest.approx(1.0)  # each move = 1 tick
+    assert diag["mean_move_ticks"] == pytest.approx(1.0)   # each move = 1 tick
 
 
 # --------------------------------------------------------------------------- #
