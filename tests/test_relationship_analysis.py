@@ -329,3 +329,146 @@ def test_spread_basis_sweep_recovers_a_planted_lead_at_coarse_grid():
     assert row5s["peak_lag_s"] < 0
     assert abs(row5s["peak_corr"]) > 0.3
     assert list(sweep["freq"]) == ["500ms", "5s"]
+
+
+# --------------------------------------------------------------------------- #
+# micro_price (Kevin #30)
+# --------------------------------------------------------------------------- #
+def test_micro_price_leans_toward_thin_side():
+    # bid 99.75 (sz 90), ask 100.25 (sz 10): heavy bid, thin ask -> price should
+    # lean UP toward the ask (little size to lift), above the 100.0 simple mid.
+    idx = _grid(1)
+    book = pd.DataFrame(
+        {"bid_px_00": [99.75], "ask_px_00": [100.25],
+         "bid_sz_00": [90.0], "ask_sz_00": [10.0]},
+        index=idx,
+    )
+    micro = ra.micro_price(book).iloc[0]
+    simple = ra.top_mid(book).iloc[0]
+    assert simple == pytest.approx(100.0)
+    assert micro > simple
+    # (99.75*10 + 100.25*90)/100 = 100.20
+    assert micro == pytest.approx(100.20)
+
+
+def test_micro_price_falls_back_to_simple_mid_on_empty_touch():
+    idx = _grid(1)
+    book = pd.DataFrame(
+        {"bid_px_00": [99.5], "ask_px_00": [100.5],
+         "bid_sz_00": [0.0], "ask_sz_00": [0.0]},
+        index=idx,
+    )
+    assert ra.micro_price(book).iloc[0] == pytest.approx(100.0)
+
+
+def test_micro_price_equals_simple_mid_when_balanced():
+    idx = _grid(3)
+    book = _book([100.0, 101.0, 102.0], idx)  # symmetric sizes
+    np.testing.assert_allclose(ra.micro_price(book), ra.top_mid(book))
+
+
+# --------------------------------------------------------------------------- #
+# trade flow + trade lead-lag + implied filter
+# --------------------------------------------------------------------------- #
+def test_signed_size_and_trade_flow_net_by_bin():
+    idx = _grid(3, freq="500ms")
+    trades = _trades(idx, [100.0, 100.0, 100.0], sizes=[5.0, 3.0, 2.0],
+                     sides=["B", "A", "N"])
+    flow = ra.trade_flow(trades, freq="500ms")
+    # +5 (B), -3 (A), 0 (N)
+    assert list(flow) == [5.0, -3.0, 0.0]
+
+
+def test_drop_implied_coincident_removes_near_simultaneous_prints():
+    base = pd.Timestamp("2026-06-09T16:00:00Z")
+    leg_idx = pd.DatetimeIndex(
+        [base, base + pd.Timedelta("1ms"), base + pd.Timedelta("1s")],
+        name=BOOK_INDEX_NAME,
+    )
+    # spread prints at base (coincides with first leg print within tol)
+    sp_idx = pd.DatetimeIndex([base], name=BOOK_INDEX_NAME)
+    leg = _trades(leg_idx, [100.0, 100.0, 100.0])
+    spread = _trades(sp_idx, [60.0])
+    kept = ra.drop_implied_coincident(leg, spread, tol="2ms")
+    # base and base+1ms are within 2ms of the spread print -> dropped
+    assert len(kept) == 1
+    assert kept.index[0] == base + pd.Timedelta("1s")
+
+
+def test_trade_lead_lag_recovers_planted_flow_lead():
+    # back flow is the front flow delayed by k bins -> front leads back.
+    rng = np.random.default_rng(11)
+    n, k = 400, 3
+    base = pd.Timestamp("2026-06-09T16:00:00Z")
+    step = pd.Timedelta("500ms")
+    grid = pd.DatetimeIndex([base + i * step for i in range(n)], name=BOOK_INDEX_NAME)
+
+    front_sign = rng.choice([-1.0, 1.0], n)
+    front_tr = _trades(grid, [7000.0] * n, sizes=[1.0] * n,
+                       sides=["B" if s > 0 else "A" for s in front_sign])
+    back_sign = np.concatenate([[1.0] * k, front_sign[:-k]])
+    back_tr = _trades(grid, [7060.0] * n, sizes=[1.0] * n,
+                      sides=["B" if s > 0 else "A" for s in back_sign])
+
+    data = CalendarSpreadData(
+        front_symbol="ESM6", back_symbol="ESU6", spread_symbol="ESM6-ESU6",
+        front=_book([7000.0] * 2, _grid(2)), back=_book([7060.0] * 2, _grid(2)),
+        spread=_book([60.0] * 2, _grid(2)),
+        front_trades=front_tr, back_trades=back_tr,
+        spread_trades=_trades(grid[:0], [], []),
+    )
+    table = ra.trade_lead_lag_table(data, freq="500ms", max_lag=8, filter_implied=False)
+    fb = table[(table["a"] == "front_flow") & (table["b"] == "back_flow")].iloc[0]
+    assert fb["peak_lag"] == k
+    assert "front_flow leads back_flow" in fb["interpretation"]
+
+
+def test_trade_lead_lag_empty_when_no_trades():
+    idx = _grid(2)
+    data = _data(_book([7000.0] * 2, idx), _book([7060.0] * 2, idx), _book([60.0] * 2, idx))
+    table = ra.trade_lead_lag_table(data, freq="500ms", max_lag=5)
+    assert table.empty
+
+
+# --------------------------------------------------------------------------- #
+# front_volatility
+# --------------------------------------------------------------------------- #
+def test_front_volatility_reports_range_in_ticks():
+    idx = _grid(5)
+    # micro==simple here (balanced); range 7340 -> 7341 = 4 ticks, with
+    # non-constant increments so realized vol (stdev of diffs) is positive.
+    front = _book([7340.0, 7340.5, 7340.25, 7340.75, 7341.0], idx)
+    data = _data(front, _book([7401.0] * 5, idx), _book([60.0] * 5, idx))
+    vol = ra.front_volatility(data, _spec())
+    assert vol["front_range_ticks"] == pytest.approx(4.0)  # (7341-7340)/0.25
+    assert vol["front_rv_ticks"] > 0
+    assert vol["front_updates"] == 5
+
+
+def test_trade_lead_lag_survives_unaligned_start_timestamp():
+    # Regression: real trades don't start on a clean 500ms boundary; must still
+    # produce a real, non-NaN result.
+    rng = np.random.default_rng(31)
+    n, k = 400, 3
+    base = pd.Timestamp("2026-06-12T16:00:00.037Z")  # deliberately off-grid
+    step = pd.Timedelta("500ms")
+    grid = pd.DatetimeIndex([base + i * step for i in range(n)], name=BOOK_INDEX_NAME)
+
+    front_sign = rng.choice([-1.0, 1.0], n)
+    front_tr = _trades(grid, [7000.0] * n, sizes=[1.0] * n,
+                       sides=["B" if s > 0 else "A" for s in front_sign])
+    back_sign = np.concatenate([[1.0] * k, front_sign[:-k]])
+    back_tr = _trades(grid, [7060.0] * n, sizes=[1.0] * n,
+                      sides=["B" if s > 0 else "A" for s in back_sign])
+    data = CalendarSpreadData(
+        front_symbol="ESM6", back_symbol="ESU6", spread_symbol="ESM6-ESU6",
+        front=_book([7000.0] * 2, _grid(2)), back=_book([7060.0] * 2, _grid(2)),
+        spread=_book([60.0] * 2, _grid(2)),
+        front_trades=front_tr, back_trades=back_tr,
+        spread_trades=_trades(grid[:0], [], []),
+    )
+    table = ra.trade_lead_lag_table(data, freq="500ms", max_lag=8, filter_implied=False)
+    fb = table[(table["a"] == "front_flow") & (table["b"] == "back_flow")].iloc[0]
+    assert not np.isnan(fb["peak_corr"])          # was NaN before the fix
+    assert fb["interpretation"] != "undetermined"
+    assert fb["peak_lag"] == k                     # still recovers the planted lead

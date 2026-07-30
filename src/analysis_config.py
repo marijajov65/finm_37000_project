@@ -1,7 +1,7 @@
 """Fetch inputs shared by the analysis and the scout.
 
-The Databento cache is keyed by symbol + schema + window, so these must match
-across scripts or they stop sharing cached data. Change them here.
+Defaults only -- both runners
+accept --product/--front-month/--days/--minutes to override per run.
 """
 
 from __future__ import annotations

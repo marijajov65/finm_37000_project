@@ -1,13 +1,16 @@
 """Run the lead-lag & co-movement analysis over the configured days (issue #11).
 
-Prints only. Runs offline from the cached ES windows; an unseeded cache needs a
-Databento key. Inputs come from analysis_config.py. Set AUTO_PICK_TOP > 0 to
-analyze the busiest days from the scout instead of DAYS.
+Prints a one-block summary per day; --full adds the underlying tables. Offline
+from the cached windows; an unseeded cache needs a Databento key. Defaults come
+from analysis_config.py, overridable on the CLI.
 
     uv run src/run_relationship_analysis.py
+    uv run src/run_relationship_analysis.py --days 2026-06-12 --minutes 30 --full
 """
 
 from __future__ import annotations
+
+import argparse
 
 import pandas as pd
 
@@ -18,9 +21,9 @@ from relationship_analysis import (
     lead_lag_table,
     liquidity_metrics,
     resample_mids,
-    spread_activity,
     spread_basis_sweep,
     spread_mid_diagnostic,
+    trade_lead_lag_table,
 )
 from analysis_config import (
     BOOK_LEVELS,
@@ -31,68 +34,83 @@ from analysis_config import (
     SESSION_START_UTC,
 )
 
-FREQ_SWEEP = ("100ms", "250ms", "500ms", "1s")
 PRIMARY_FREQ = "500ms"
-MAX_LAG = 40  # in grid steps; 40 * 500ms = 20s
-
-# If > 0, re-scan the scout's candidate days and analyze the N busiest instead
-# of DAYS. Costs a full re-scan, so off by default.
-AUTO_PICK_TOP = 0
+MAX_LAG = 40  # grid steps; 40 * 500ms = 20s
 
 
-def _freq_sensitivity(data, pair=("front_mid", "back_mid")) -> pd.DataFrame:
-    """front->back peak lag/corr at each grid in FREQ_SWEEP (the Epps check)."""
-    rows = []
-    for freq in FREQ_SWEEP:
-        panel = resample_mids(data, freq=freq)
-        row = lead_lag_table(panel, max_lag=MAX_LAG, pairs=(pair,)).iloc[0]
-        rows.append({"freq": freq, "grid_points": len(panel),
-                     "peak_lag_steps": row["peak_lag"], "peak_corr": round(float(row["peak_corr"]), 4)})
-    return pd.DataFrame(rows)
+def _parse_args() -> argparse.Namespace:
+    default_minutes = SESSION_LENGTH.total_seconds() / 60.0
+    p = argparse.ArgumentParser(description=__doc__,
+                                formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--product", default=PRODUCT)
+    p.add_argument("--front-month", default=FRONT_MONTH)
+    p.add_argument("--days", nargs="+", default=None)
+    p.add_argument("--minutes", type=float, default=default_minutes)
+    p.add_argument("--start-utc", default=SESSION_START_UTC)
+    p.add_argument("--freq", default=PRIMARY_FREQ)
+    p.add_argument("--max-lag", type=int, default=MAX_LAG)
+    p.add_argument("--full", action="store_true", help="also print the full tables")
+    return p.parse_args()
+
+
+def _summary(data, spec, panel, freq, max_lag) -> None:
+    """The five lines that carry the findings."""
+    ll = lead_lag_table(panel, max_lag=max_lag)
+    fb = ll[(ll.a == "front_mid") & (ll.b == "back_mid")].iloc[0]
+    tll = trade_lead_lag_table(data, freq=freq, max_lag=max_lag)
+    tfb = tll[(tll.a == "front_flow") & (tll.b == "back_flow")]
+    tflow = f"{tfb.iloc[0]['peak_corr']:.2f}" if not tfb.empty else "n/a"
+
+    impl = deferred_vs_implied(panel)
+    moves = spread_mid_diagnostic(data, spec)["n_mid_moves"]
+    sweep = spread_basis_sweep(data)
+    rate = liquidity_metrics(data, spec)["update_rate_per_s"]
+
+    print(f"  front<->back    lag {fb['peak_lag']}, corr {fb['peak_corr']:.2f} "
+          f"(trade flow {tflow})")
+    print(f"  deferred=f+s    R2={impl['r_squared']:.3f}  b_front={impl['beta_front']:.2f}  "
+          f"b_spread={impl['beta_spread']:.2f}  ({moves} spread moves)")
+    corrs = " / ".join(f"{c:.2f}" for c in sweep["zerolag_corr"])
+    grids = " ".join(sweep["freq"])
+    print(f"  spread<->basis  {corrs}  ({grids})")
+    print(f"  updates/s       front {rate['front']:.0f}  back {rate['back']:.0f}  "
+          f"spread {rate['spread']:.0f}")
+
+
+def _full(data, spec, panel, freq, max_lag) -> None:
+    """The tables behind the summary."""
+    print("\n  Liquidity:")
+    print(liquidity_metrics(data, spec).round(3).to_string())
+    print(f"\n  Change correlations ({freq}):")
+    print(change_corr(panel).round(3).to_string())
+    print("\n  Lead-lag, quote mids:")
+    print(lead_lag_table(panel, max_lag=max_lag).to_string(index=False))
+    print("\n  Lead-lag, trade flow:")
+    print(trade_lead_lag_table(data, freq=freq, max_lag=max_lag).to_string(index=False))
+    print("\n  Spread vs basis by interval (peak_lag_s < 0 = basis leads):")
+    print(spread_basis_sweep(data).to_string(index=False))
 
 
 def main() -> None:
+    args = _parse_args()
+    session_length = pd.Timedelta(minutes=args.minutes)
     fetcher = CachedMarketDataFetcher.from_databento_key(levels=BOOK_LEVELS)
-    spec = fetcher.fetch_calendar_spread_contract_specification(FRONT_MONTH, PRODUCT)
+    spec = fetcher.fetch_calendar_spread_contract_specification(args.front_month, args.product)
     print(f"{spec.spread_symbol}  ({spec.front_symbol} / {spec.back_symbol})\n")
 
-    if AUTO_PICK_TOP:
-        from scout_spread_activity import top_active_days
-        days = top_active_days(AUTO_PICK_TOP)
-        print(f"auto-picked top {AUTO_PICK_TOP} by spread activity: {days}\n")
-    else:
-        days = DAYS
-
+    days = args.days if args.days is not None else DAYS
     for day in days:
-        t0 = pd.Timestamp(f"{day}T{SESSION_START_UTC}", tz="UTC")
-        t1 = t0 + SESSION_LENGTH
-        print(f"=== {day} {SESSION_START_UTC}..{t1:%H:%M:%S} UTC ===", flush=True)
+        t0 = pd.Timestamp(f"{day}T{args.start_utc}", tz="UTC")
+        t1 = t0 + session_length
+        data = fetcher.fetch_calendar_spread_data(args.front_month, args.product, t0, t1)
+        panel = resample_mids(data, freq=args.freq)
 
-        data = fetcher.fetch_calendar_spread_data(FRONT_MONTH, PRODUCT, t0, t1)
-        print(f"  events: front={len(data.front)} back={len(data.back)} spread={len(data.spread)}")
-
-        panel = resample_mids(data, freq=PRIMARY_FREQ)
-        implied = deferred_vs_implied(panel)
-        act = spread_activity(data)
-        mid = spread_mid_diagnostic(data, spec)
-
-        print("\n  Liquidity:")
-        print(liquidity_metrics(data, spec).round(3).to_string())
-        print(f"\n  Change correlations ({PRIMARY_FREQ}):")
-        print(change_corr(panel).round(3).to_string())
-        print("\n  Lead-lag:")
-        print(lead_lag_table(panel, max_lag=MAX_LAG).to_string(index=False))
-        print("\n  Deferred ~ front + spread:")
-        print(f"    R^2={implied['r_squared']:.4f}  beta_front={implied['beta_front']:.4f}"
-              f"  beta_spread={implied['beta_spread']:.4f}  resid_std={implied['resid_std']:.4f}")
-        print(f"\n  Spread activity: updates={act['spread_updates']} moves={act['spread_mid_moves']}"
-              f" trades={act['spread_trades']} volume={act['spread_volume']:.0f}")
-        print(f"  Spread mid: {mid['n_distinct_mids']} distinct, range {mid['mid_range_ticks']:.1f} ticks,"
-              f" {mid['n_mid_moves']} moves (mean {mid['mean_move_ticks']:.2f})")
-        print("\n  Spread vs basis by interval (peak_lag_s < 0 = basis leads):")
-        print(spread_basis_sweep(data).to_string(index=False))
-        print("\n  Front->back sensitivity:")
-        print(_freq_sensitivity(data).to_string(index=False))
+        print(f"=== {day} {args.start_utc}..{t1:%H:%M:%S} UTC  "
+              f"(front {len(data.front):,} / back {len(data.back):,} / "
+              f"spread {len(data.spread):,}) ===")
+        _summary(data, spec, panel, args.freq, args.max_lag)
+        if args.full:
+            _full(data, spec, panel, args.freq, args.max_lag)
         print()
 
 
