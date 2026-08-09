@@ -3,8 +3,7 @@
 Issue #10 (Exchange Rebate Pivotality Analysis) needs the P&L engine's output
 across many model configurations, not a single run. ``RebatePivotalityAnalyzer``
 ingests ``List[pd.Series]`` of ``generate_pnl()`` output and averages the
-Bernoulli seeds, optionally taking a second, higher-``p`` set to represent DMM
-priority matching. This script produces exactly that, on disk, so #10 can be
+Bernoulli seeds. This script produces exactly that, on disk, so #10 can be
 developed and re-run without touching Databento.
 
 Why a sweep rather than one run
@@ -80,8 +79,10 @@ BOOK_LEVELS = 1
 # Sweep grid
 # ---------------------------------------------------------------------- #
 #: Probability of being at the head of the queue. The low end is a realistic
-#: non-privileged market maker; 1.0 is the upper bound where every trade fills
-#: us. #10 reads the high-p cells as the DMM priority-matching flow.
+#: market maker; 1.0 is the upper bound where every trade fills us. This is a
+#: property of how fast and how well placed the quote is, not a privilege the
+#: exchange grants -- ES matches FIFO on Globex, and CME's market-maker
+#: programs move the fee, not the allocation.
 P_GRID = (0.05, 0.10, 0.25, 0.50, 0.75, 1.00)
 
 #: Spread contracts we tolerate before legging out the excess. Drives the
@@ -131,11 +132,10 @@ def load_samples(
             not filter on that axis.
         path: override the samples file location.
 
-    Example — the two arguments #10's report takes::
+    Example — what #10's report takes::
 
-        std = load_samples(p_queue_head=0.50, max_position=5.0)
-        dmm = load_samples(p_queue_head=1.00, max_position=5.0)
-        RebatePivotalityAnalyzer(1.30, 2.76).generate_pivotality_report(std, dmm)
+        samples = load_samples(p_queue_head=0.50, max_position=5.0)
+        RebatePivotalityAnalyzer(1.30, 2.76).generate_pivotality_report(samples)
     """
     path = path or (OUTPUT_DIR / "pnl_samples.csv")
     df = pd.read_csv(path)
@@ -151,6 +151,112 @@ def load_samples(
         )
     df = df.drop(columns=_KEY_COLUMNS)
     return [row for _, row in df.iterrows()]
+
+
+def load_sessions(
+    fetcher,
+    cost_calculator: LeggingCostCalculator,
+    product: str = PRODUCT,
+    front_month: str = FRONT_MONTH,
+    days: tuple[str, ...] | list[str] = DAYS,
+    start_utc: str = SESSION_START_UTC,
+    session_length: pd.Timedelta = SESSION_LENGTH,
+    verbose: bool = True,
+) -> tuple[dict[str, list], dict[str, dict[str, str]]]:
+    """Extract each session's transaction stream once.
+
+    The streams depend only on the market data, not on the model parameters,
+    so the ~60k-event merge per day happens once rather than once per grid
+    cell. Returns ``(streams_by_day, windows_by_day)``; the second is the
+    ISO start/end of each session, for the run manifest.
+
+    Split out of ``main`` so a caller sweeping a different window (see
+    ``run_rebate_analysis.py``) reuses this rather than reimplementing it.
+    """
+    sessions: dict[str, list] = {}
+    windows: dict[str, dict[str, str]] = {}
+    for day in days:
+        t0 = pd.Timestamp(f"{day}T{start_utc}", tz="UTC")
+        t1 = t0 + session_length
+        windows[day] = {"start": t0.isoformat(), "end": t1.isoformat()}
+        if verbose:
+            print(f"  {day} loading...", flush=True)
+
+        data = fetcher.fetch_calendar_spread_data(front_month, product, t0, t1)
+        sessions[day] = extract_transactions(data, cost_calculator)
+        if verbose:
+            print(
+                f"    books front={len(data.front)} back={len(data.back)} "
+                f"spread={len(data.spread)} -> {len(sessions[day])} transaction(s)"
+            )
+    return sessions, windows
+
+
+def sweep(
+    sessions: dict[str, list],
+    days: tuple[str, ...] | list[str],
+    fees,
+    contract_multiplier: float,
+    p_grid: tuple[float, ...] = P_GRID,
+    max_position_grid: tuple[float, ...] = MAX_POSITION_GRID,
+    n_seeds: int = N_SEEDS,
+    base_seed: int = BASE_SEED,
+) -> pd.DataFrame:
+    """Replay every (session, p, max_position, seed) cell of the grid.
+
+    One row per cell, carrying every ``generate_pnl()`` field plus the
+    per-sample break-even fee and rebate. The pooled row (``POOLED_LABEL``)
+    runs a single calculator across all days in order, so inventory carries
+    from one session into the next -- not the same as summing the per-day
+    rows.
+    """
+    rows: list[dict] = []
+    for p in p_grid:
+        for max_position in max_position_grid:
+            for i in range(n_seeds):
+                seed = base_seed + i
+
+                def run(label: str, streams: list[list]) -> None:
+                    """One calculator over one or more sessions, in order."""
+                    calc = PnLCalculator(
+                        p=p,
+                        max_position=max_position,
+                        passive_fee=fees.passive_fee,
+                        aggressive_fee=fees.aggressive_fee,
+                        contract_multiplier=contract_multiplier,
+                        seed=seed,
+                    )
+                    for stream in streams:
+                        consume_all(stream, calc)
+                    summary = calc.generate_pnl()
+                    be_fee, rebate = _breakeven(summary, fees.passive_fee)
+                    rows.append(
+                        {
+                            "session": label,
+                            "seed": seed,
+                            **summary.to_dict(),
+                            "breakeven_passive_fee": be_fee,
+                            "required_rebate_per_contract": rebate,
+                        }
+                    )
+
+                for day in days:
+                    run(day, [sessions[day]])
+                # pooled: inventory carries across sessions
+                run(POOLED_LABEL, [sessions[d] for d in days])
+
+    return pd.DataFrame(rows)
+
+
+def as_pnl_series(samples: pd.DataFrame) -> list[pd.Series]:
+    """Numeric-only rows, the ``List[pd.Series]`` Issue #10 expects.
+
+    ``RebatePivotalityAnalyzer._get_average_metrics`` does
+    ``pd.DataFrame(samples).mean()``, which raises ``TypeError`` on the
+    string ``session`` label. Same contract as ``load_samples`` below, but
+    against an in-memory frame rather than the CSV on disk.
+    """
+    return [row for _, row in samples.drop(columns=_KEY_COLUMNS).iterrows()]
 
 
 def _breakeven(row: pd.Series, passive_fee: float) -> tuple[float, float]:
@@ -177,64 +283,12 @@ def main() -> None:
 
     print(f"{spec.spread_symbol}  ({spec.front_symbol} / {spec.back_symbol})")
 
-    # ---- Extract each session's transactions once. -------------------- #
-    # Independent of the model parameters, so the ~60k-event merge per day
-    # happens once rather than once per grid cell.
-    sessions: dict[str, list] = {}
-    windows: dict[str, dict[str, str]] = {}
-    for day in DAYS:
-        t0 = pd.Timestamp(f"{day}T{SESSION_START_UTC}", tz="UTC")
-        t1 = t0 + SESSION_LENGTH
-        windows[day] = {"start": t0.isoformat(), "end": t1.isoformat()}
-        print(f"  {day} loading...", flush=True)
-
-        data = fetcher.fetch_calendar_spread_data(FRONT_MONTH, PRODUCT, t0, t1)
-        sessions[day] = extract_transactions(data, cost_calculator)
-        print(
-            f"    books front={len(data.front)} back={len(data.back)} "
-            f"spread={len(data.spread)} -> {len(sessions[day])} transaction(s)"
-        )
+    sessions, windows = load_sessions(fetcher, cost_calculator)
 
     n_cells = len(P_GRID) * len(MAX_POSITION_GRID) * N_SEEDS * (len(DAYS) + 1)
     print(f"\nsweeping {n_cells} configurations...", flush=True)
 
-    # ---- Replay the grid. --------------------------------------------- #
-    rows: list[dict] = []
-    for p in P_GRID:
-        for max_position in MAX_POSITION_GRID:
-            for i in range(N_SEEDS):
-                seed = BASE_SEED + i
-
-                def run(label: str, streams: list[list]) -> None:
-                    """One calculator over one or more sessions, in order."""
-                    calc = PnLCalculator(
-                        p=p,
-                        max_position=max_position,
-                        passive_fee=fees.passive_fee,
-                        aggressive_fee=fees.aggressive_fee,
-                        contract_multiplier=contract_multiplier,
-                        seed=seed,
-                    )
-                    for stream in streams:
-                        consume_all(stream, calc)
-                    summary = calc.generate_pnl()
-                    be_fee, rebate = _breakeven(summary, fees.passive_fee)
-                    rows.append(
-                        {
-                            "session": label,
-                            "seed": seed,
-                            **summary.to_dict(),
-                            "breakeven_passive_fee": be_fee,
-                            "required_rebate_per_contract": rebate,
-                        }
-                    )
-
-                for day in DAYS:
-                    run(day, [sessions[day]])
-                # pooled: inventory carries across sessions
-                run(POOLED_LABEL, [sessions[d] for d in DAYS])
-
-    samples = pd.DataFrame(rows)
+    samples = sweep(sessions, DAYS, fees, contract_multiplier)
     key = ["session", "p_queue_head", "max_position"]
     metrics = [c for c in samples.columns if c not in key + ["seed"]]
 
