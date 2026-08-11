@@ -289,10 +289,10 @@ def main() -> None:
 
         back = implied_back_book(data, spec, legs=legs)
         back_cmp = compare_books(back, data.back, outright_tick)
-        back_episodes = divergence_episodes(back_cmp)        
+        back_episodes = divergence_episodes(back_cmp)
         _print_summary(
             f"implied {spec.back_symbol}  <- front + spread",
-            summarize(compare_books(back, data.back, outright_tick), outright_tick),
+            summarize(back_cmp, back_episodes, outright_tick),
         )
 
         spread = implied_spread_book(data, spec, legs=legs)
@@ -300,7 +300,7 @@ def main() -> None:
         spread_episodes = divergence_episodes(spread_cmp)
         _print_summary(
             f"implied {spec.spread_symbol}  <- front + back",
-            summarize(compare_books(spread, data.spread, spread_tick), spread_tick),
+            summarize(spread_cmp, spread_episodes, spread_tick),
         )
 
 
