@@ -558,21 +558,37 @@ class MarketDataFetcher:
     ) -> pd.DataFrame:
         """Fetch Databento instrument definitions for the legs and the spread.
 
-        Both bounds are day-aligned (midnight UTC). Databento rejects a
-        sub-day-precise ``start`` when ``end`` is omitted — it forward-fills
-        the definition state from ``start`` and can only do that from a day
-        boundary — so ``pd.Timestamp.now()`` cannot be passed through
-        unrounded (422 data_start_too_precise_to_forward_fill).
+        ``end`` is deliberately omitted, not just backed off from "now":
+
+        - With an explicit ``end``, Databento materializes one definition
+          row per calendar day per symbol across the whole
+          ``[start, end)`` window — for a 400-day lookback that's ~1,200
+          rows and, on this account, 1-5+ minutes per call (confirmed by
+          timing it directly: a single symbol over just a 30-day *explicit*
+          window took 59s). Omitting ``end`` instead makes Databento
+          forward-fill to a single current-state row per symbol, which
+          returns in ~10s for all three symbols.
+        - An explicit ``end`` at or near "now" also 422s with
+          ``dataset_unavailable_range`` on accounts whose GLBX.MDP3
+          entitlement embargoes the most recent day(s), even though the
+          *dataset* itself covers the range (confirmed via
+          ``client.metadata.get_dataset_condition``). Omitting ``end``
+          sidesteps this too — Databento resolves it to whatever the
+          account is actually entitled to.
+
+        The tradeoff: ``start`` must be a plain ``YYYY-MM-DD`` date string,
+        not a full ISO timestamp (even one at exact midnight) — Databento's
+        forward-fill rejects a "too precise" ``start`` when ``end`` is
+        omitted (422 data_start_too_precise_to_forward_fill).
         """
-        now = pd.Timestamp.now(tz="UTC")
-        start = (now - pd.Timedelta(days=_DEFINITION_LOOKBACK_DAYS)).normalize()
-        end = now.normalize()
+        start = (
+            pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=_DEFINITION_LOOKBACK_DAYS)
+        ).strftime("%Y-%m-%d")
         dbn = self._client.timeseries.get_range(
             dataset=self._dataset,
             schema="definition",
             symbols=[symbol1, symbol2, spread_symbol],
-            start=start.isoformat(),
-            end=end.isoformat(),
+            start=start,
         )
         df = dbn.to_df()
         if df.empty:

@@ -1,176 +1,107 @@
-# Calendar Spread Market-Making Incentives
+# Calendar Spread Market-Making: ES (E-mini S&P 500)
 
-## Goal
+Quantifying what it actually costs a market maker to quote the ES calendar spread — and whether CME needs to pay them to keep doing it.
 
-This project studies **calendar spread market-making on CME** and pursues two goals.
+## Results
 
-### Goal 1 — When and where is an exchange incentive pivotal?
-
-> **What is the expected P&L of quoting the calendar spread under realistic fill and hedging dynamics; under what conditions does an exchange incentive — fee discount, market maker rebate, or other compensation — become necessary; and which market should that incentive target?**
-
-A trader can express a calendar view either by trading the two outright contracts separately (legging) or by trading the exchange-listed spread instrument as a single order. The spread instrument quotes a tighter bid–ask than the implied cost of crossing both outright books, so traders prefer it — and the market maker on the other side faces a real **legging cost** if it crosses out into the outrights to flatten (the worked example below puts this at \$25/contract for ES).
-
-But that legging cost is not the market maker's expected loss. A market maker that crosses out *immediately* on every fill would lose; a real desk does not. Its actual P&L also includes the bid–ask it earns on round-trip and offsetting flow, passive (resting) fills that avoid crossing, and CME implied matching — all of which can turn the activity profitable without any subsidy. The legging cost is therefore a floor on what the market maker must overcome, not a verdict.
-
-The deliverable is a model of the market maker's **expected** P&L — legging cost, passive vs. aggressive fill probabilities, adverse selection, and inventory/holding risk — estimated bottom-up from real order-book data (via Databento) rather than assumed. We then ask the sharper question: holding that P&L below break-even, **how much net economic support must CME provide to make the service worthwhile?** We measure that support as a single break-even figure in a common unit (effective \$/contract, or \$/month), recognizing that the exchange can deliver it through several interchangeable forms — a fee discount or waiver, a per-contract rebate, volume-tier pricing, market-data or messaging allowances, or designated-market-maker priority and allocation benefits. A natural follow-up is which delivery form is most efficient, and how the required level compares to CME's actual market-maker and incentive programs for these products. We start from the `project_fetch_data.py` snapshot and the legging-cost analysis below and build out from there.
-
-A related question runs through Goal 1: **how does market making the calendar spread differ from market making a normal product/instrument?** The spread is two-legged, links to the outright books via CME implied matching, carries basis rather than directional inventory risk, and lives in a thinner, roll-driven market — so the market maker's role, risks, and the incentive it needs may all differ from the outright case. We treat this difference as a question to investigate rather than assume.
-
-### Goal 2 — Relationship analysis and a market-making strategy for the deferred leg and the spread
-
-> **What is the statistical relationship between the front month, the back month, and the calendar spread — and, building on it, what is a sound market-making strategy for the deferred leg and the calendar spread markets?**
-
-First we characterize the three markets empirically: their liquidity (bid–ask, depth, quoting and trade activity) and the lead–lag / co-movement relationships among them. The working hypothesis, to be confirmed in the data, is that the **front month leads** — it is the most liquid and carries outright price discovery — while the **calendar spread leads the basis** (the term structure), and the **deferred leg follows both**, its quotes being largely implied from front + spread.
-
-On that footing we build the quoting strategy. The idea is simple: we **imply the deferred leg from the front month and the spread** (deferred ≈ front + spread). Taking the liquid front-month price as given and quoting the spread, the deferred price follows — so we never forecast index direction. The maker hedges directional risk in the liquid front leg and manages inventory and legging risk, treating the deferred leg and the spread as a single joint book.
-
-**Validation step.** Before trusting the strategy, we check the model against reality: we build a *modeled* deferred-leg book from the front leg plus the spread (the implied book) and compare it to the *real* deferred-leg book from the data. If the two are close, the model captures the deferred market well — which justifies using the Goal 1 P&L model to estimate the market-making strategy's expected P&L.
-
-The two goals are linked: the quote width and quoting behavior the strategy can sustain depend directly on the incentive analysis in Goal 1. The support level determined there sets how tightly the market maker can afford to quote and still break even, so Goal 1 fixes the economic floor and Goal 2 builds the quoting policy on top of it.
-
-### Instruments in scope
-
-We begin with the **E-mini S&P 500 (ES) calendar spread** (e.g. ESM6–ESU6) as the worked example, then extend the analysis to calendar spreads on other CME products. CME Globex lists exchange-defined calendar (inter-delivery) spreads as single tradable instruments — each with its own order book — across many asset classes, so the same legging-cost dynamic can be measured for each. Candidate products include:
-
-| Asset class | Product (code) |
-|---|---|
-| Equity index | E-mini S&P 500 (ES), E-mini Nasdaq-100 (NQ), E-mini Dow (YM), E-mini Russell 2000 (RTY) |
-| Energy | WTI Crude Oil (CL), Henry Hub Natural Gas (NG), RBOB Gasoline (RB), Heating Oil (HO) |
-| Metals | Gold (GC), Silver (SI), Copper (HG) |
-| Grains | Corn (ZC), Soybeans (ZS), Wheat (ZW) |
-| Interest Rates | 2-Year T-Note (ZT), 5-Year T-Note (ZF), 10-Year T-Note (ZN) |
-| Foreign Exchange | Euro FX (6E), Japanese Yen (6J), British Pound (6B) |
-
-The instruments we intend to explore are *futures* calendar spreads (one order, both legs). They are distinct from **Calendar Spread Options (CSOs)** — options written on the spread — which CME also lists but which are outside this project's scope.
-
-
-## Motivation
-
-Market participants have a clear incentive to trade the spread, while the market maker appears to lose money — on the surface. That tension — a real legging cost on one side, persistent tight two-sided quotes on the other — is what motivates both goals: modeling the market maker's *true* expected P&L and when an incentive is pivotal (Goal 1), and characterizing the front/back/spread relationship to quote the deferred leg and the spread (Goal 2).
-
-### Why traders need the spread: rolling positions
-
-There is a constant, structural demand for calendar spreads because traders routinely need to **roll their positions from the front month to the back month**. A trader who is long (or short) the expiring front contract but wants to keep the exposure must, before expiry, close the front-month position and re-open it in the deferred month. That roll *is* a calendar spread: sell the front and buy the back (or vice versa), executed as a single package. Because contracts expire on a fixed cycle, this rolling demand recurs every quarter and concentrates around the roll period — which is exactly the flow the spread instrument is designed to serve.
-
-### The two ways to trade a calendar spread
-
-Suppose a trader wants to roll a long position forward — i.e. be **long the ESU6–ESM6 calendar** (buy the back month U6, sell the front month M6). They have two routes:
-
-1. **Leg the outrights** — sell ESM6 and buy ESU6 as two separate orders, each crossing its own bid–ask spread.
-2. **Trade the spread instrument** — submit one order on the exchange-listed ESM6–ESU6 spread, which has its own, much tighter, bid–ask.
-
-Because the spread instrument is quoted far tighter than the two outright books combined, route 2 is cheaper for the trader. That is exactly why the spread instrument exists and attracts flow.
-
-### Worked example: ES calendar spread (order-book snapshot)
-
-We illustrate the dynamic with the ES calendar spread; the same calculation will be repeated for the other products in scope. The order books of the two outright legs and the spread instrument, from a representative snapshot taken at **2026-06-10 16:00:00 UTC (10:00 AM CT)**, are shown below (asks on top, bids below; the best bid and best ask sit just above and below the divider):
+Below is a live CME order-book snapshot for ESM6 (front), ESU6 (back), and the ESM6–ESU6 calendar spread, pulled directly from Databento at 2026-06-10 16:00:00 UTC (asks above bids; reproduce with `uv run src/main.py`):
 
 ```
         ESM6 (front)            ESU6 (back)          ESM6-ESU6 spread
        Sz         Px           Sz         Px           Sz         Px
      ------  ---------       ------  ---------       ------  ---------
-        120    7341.25          110    7402.25          350      60.95   asks
-         95    7341.00           80    7402.00          300      60.90
-         60    7340.75           55    7401.75          250      60.85
-         40    7340.50           35    7401.50          180      60.80
-         25    7340.25 <ask      20    7401.25 <ask      90      60.75 <ask
+         30    7341.50           9    7402.25          28      60.95   asks
+         23    7341.25           7    7402.00         160      60.90
+         19    7341.00           9    7401.75          20      60.85
+         17    7340.75           7    7401.50         182      60.80
+         12    7340.50 <ask      1    7401.25 <ask     128      60.75 <ask
      ------  ---------       ------  ---------       ------  ---------
-         30    7340.00 <bid      22    7401.00 <bid      85      60.70 <bid
-         55    7339.75           50    7400.75          175      60.65
-         80    7339.50           75    7400.50          240      60.60
-        110    7339.25          100    7400.25          290      60.55   bids
-        140    7339.00          130    7400.00          340      60.50
+         14    7340.00 <bid      4    7400.75 <bid       7      60.70 <bid
+         15    7339.75           7    7400.50          45      60.65
+         17    7339.50          16    7400.25          59      60.60
+         20    7339.25          13    7400.00          20      60.55
+         18    7339.00          13    7399.75          23      60.50   bids
 ```
 
-The relevant touch prices are therefore: ESM6 best bid **7340.00**, ESU6 best ask **7401.25**, and ES spread best ask **60.75** (best bid **60.70**, a 0.05-point market). Note the spread instrument is quoted **0.05 points wide**, far tighter than the **0.25-point** tick on each outright leg.
+A trader buying the spread pays the spread ask, 60.75. A market maker taking the other side and flattening immediately by legging out — selling ESM6 at the bid (7340.00) and buying ESU6 at the ask (7401.25) — pays 61.25 points to unwind a position it was paid only 60.75 for: a loss of 0.50 points, or **$25 per contract** at ES's $50/point multiplier.
 
-The ES multiplier is **\$50 per index point**, and one tick (0.25 pt) is worth \$12.50.
+That $25 floor is what the rest of the project tests against real sessions instead of one snapshot. Running the P&L model on two live 5-minute ES sessions (2026-06-09/10, 16:00 UTC, top-of-book, a 50% chance of winning a passive fill, a 5-contract inventory cap before legging out) gives:
 
-A trader who buys the spread instrument pays the **spread ask = 60.75 points**. The market maker is the counterparty: it **sells the spread**, leaving it short the spread, i.e. **long ESM6 / short ESU6**.
+| Scenario | Passive fee/rebate | Expected net P&L |
+|---|---|---|
+| Status quo (current $1.30 fee) | $1.30 | -$12,054 |
+| Full fee waiver | $0.00 | -$9,931 |
+| Break-even | **-$17.62** | $0 |
 
-To flatten immediately, the market maker legs out in the outright books:
+A fee waiver alone is not enough — the strategy still loses money at zero fees. Breaking even needs CME to actually pay the market maker about **$17.62 per spread contract** filled, not merely stop charging its own $1.30. Sweeping fill probability (5%–100%) and inventory tolerance (1–50 contracts) across a 6×6 grid puts the required rebate anywhere from **$6.95 to $22.71 per contract**, and it falls sharply as the inventory cap widens — fewer forced legging-outs is a much bigger lever than winning more passive fills:
 
-- Sell ESM6 → hits the **bid** at 7340.00
-- Buy ESU6 → hits the **ask** at 7401.25
+| p (fill chance) \ cap | 1 | 2 | 5 | 10 | 25 | 50 |
+|---|---|---|---|---|---|---|
+| 0.05 | 21.47 | 19.85 | 16.74 | 14.21 | 10.79 | **6.95** |
+| 0.25 | 21.62 | 20.39 | 18.09 | 16.02 | 12.57 | 10.08 |
+| 0.50 | 22.69 | 21.37 | 18.98 | 16.97 | 13.81 | 11.71 |
+| 1.00 | **22.71** | 21.49 | 19.17 | 17.01 | 14.09 | 11.86 |
 
-$$\text{Cost of legging out} = 7401.25 - 7340.00 = 61.25 \text{ points}$$
+On the deferred-leg side, front and back move almost in lockstep (correlation ≈0.98, contemporaneous, all three sampled sessions), and `deferred ≈ front + spread` fits extremely well as a regression (R² = 0.998–1.000, front coefficient ≈1.00). But the literal quoted touch is a different story: the implied deferred book matches the real ESU6 book's exact bid/ask only **3.5%–35%** of the time across the same three sessions (2026-06-12/15/16) — every one comes back **WEAK COUPLING**. Going the other direction is more striking: implying the spread from front + back produces a synthetic book **10–14 ticks wide** against the real spread market's **~1-tick** width — a roughly ten-times-wider synthetic spread, independently reproducing (from three live sessions three weeks after the snapshot above) the same ~10x tightness advantage the worked example opened with.
 
-But the market maker only collected the spread ask it sold:
+**Conclusion.** The legging-cost intuition holds up from two independent angles — a single order-book snapshot and a from-scratch book reconstruction three weeks later both put the spread's advantage at roughly 10x. But that cost is a floor, not the outcome: the P&L model shows the tested configuration losing money regardless, and closing the gap needs a real rebate, not just a fee cut. On the quoting side, `front + spread` is a strong *statistical* estimator of the deferred leg's fair value but a poor literal quoting rule — excellent fit in a regression sense, weak tick-for-tick — so a real quoting policy would need to smooth or lag the implied price rather than post it directly. These are five-minute windows on three or four sampled days, not a full backtest — directionally informative, not a final number.
 
-$$\text{P\\&L} = 60.75 - 61.25 = -0.50 \text{ points} = -0.50 \times \$50 = \boxed{-\$25 \text{ per contract}}$$
+## What's built
 
-### The punchline
+The project targets **ES only** (ESM6–ESU6); other CME products were dropped from scope to focus on one validated pipeline — see `DEVELOPER_NOTES.md` for the original plan. `legging_cost_calculator.py` and `pnl_calculator.py` replay real order-book and trade data through a fill model (passive-fill probability, inventory cap, CME's fee schedule) into the P&L above; `rebate_pivotality_analyzer.py` and `run_pivotality_inputs.py` solve it for the break-even rebate across a grid. `relationship_analysis.py` fits `deferred ≈ front + spread`; `implied_outright.py`/`implied_spread.py` build the synthetic books and score them against the real ones (`run_deferred_validator.py`, `run_strategy_analysis.py`). Both pipelines run end-to-end against live Databento data and are reproducible from the CLI below — this repository doesn't commit `data_cache/` or `results/`, so re-running refreshes the numbers above against whatever window you point them at.
 
-The market maker **loses \$25 per contract** if it hedges by legging out the instant it is filled. The spread instrument trades tighter (here a 0.05-point bid–ask) than the implied cost of crossing both outright books (a 0.25-point half-spread on each side, ≈ 0.50 points of net disadvantage). The trader captures that tightness as a saving; the market maker absorbs the **legging cost** and the inventory risk of holding an unhedged position while waiting for offsetting flow.
+## What's not there yet
 
-So the surface picture is:
+No single interactive application or PDF report generator — each analysis is its own CLI script. Test coverage is solid for the market-data layer and the relationship module but thin on the P&L, rebate, and implied-book modules.
 
-- **Trader:** saves ~0.50 points by using the tight spread instrument instead of legging.
-- **Market maker:** appears to lose ~\$25/contract on every immediately-hedged fill.
+## Future work
 
-A market maker that crossed out on every fill would indeed lose — but the \$25 is a **floor**, not its expected P&L. Liquid, tight spread markets exist precisely because the economics close elsewhere: earning the bid–ask on round-trip and offsetting flow, passive fills that avoid crossing, implied matching, and disciplined inventory management. Two questions follow, and they are the project's goals: *given* those dynamics, what is the market maker's expected P&L and when does an exchange incentive actually become pivotal (**Goal 1**); and, using the statistical relationship among the front month, back month, and spread, how should the market maker quote the deferred leg and the spread (**Goal 2**).
+- Investigate the touch-match / regression-fit gap on the deferred leg directly — why `deferred ≈ front + spread` fits so well in levels (R² ≈ 1.0) but rarely matches the real book tick-for-tick, and whether a smoothed or lagged implied quote closes it.
+- Backtest the deferred-leg/spread quoting policy itself — not just validate the joint-book assumption — and report its P&L the way the bottom-up model above does for the spread.
+- Widen the sample past a handful of 5-minute windows before treating any of the figures above as more than directional.
+- Extend beyond ES once the pipeline has more mileage on it; `product_specs.json` already carries structural specs for ZN, CL, and 6E.
+- Add unit tests for `pnl_calculator.py`, `rebate_pivotality_analyzer.py`, and the implied-book modules.
 
-## Project Outcomes and Usage
+## Prerequisites
 
-### Delivering on Goal 1
-
-- Bottom-up P&L model: We will deliver a comprehensive model of the maker's expected P&L, estimated from real order-book data, to isolate the true economic impact of legging costs.
-- Rebate efficiency analysis: By holding P&L below break-even, we will determine exactly how large an exchange incentive must be to become pivotal for sustaining persistent, two-sided quotes.
-
-### Delivering on Goal 2
-
-- Empirical relationship characterization: We will provide a statistical analysis of the front-month, back-month, and calendar spread markets, confirming the lead–lag and co-movement relationships that define market structure.
-- Joint-book quoting policy: Building on the economic floor established in Goal 1, we will deliver an  market-making strategy that quotes the deferred leg and the calendar spread consistently as a joint book, anchored to the front-month contract.
-
-### How to run the project
-The application allows you to intuitively select your desired asset class and product of interest. Upon selection, the application synthesizes the underlying leg transactions to model the maker's expected P&L. The application also allows the user to generate a summary_report.pdf (saved to a user-defined directory), providing a comprehensive briefing on our research that applies to an asset class or a product selected by user:
-
-- **Incentive pivotality report:** The output of the bottom-up P&L model, which isolates the economic impact of legging costs and determines the specific exchange incentive magnitude required to be pivotal for sustaining persistent, two-sided quotes.
-- **Strategy performance metrics:** An evaluation of the joint-book quoting policy for the deferred leg and calendar spread, which leverages empirical characterization of market lead–lag and co-movement relationships to maintain consistent, front-month-anchored quoting.
-
-### Prerequisites
 - [uv](https://docs.astral.sh/uv/) installed
-- A [Databento](https://databento.com) account and API key
+- Python 3.12 (installed automatically by `uv` from `.python-version`)
+- A [Databento](https://databento.com) account with access to the `GLBX.MDP3` (CME Globex) dataset, and an API key
 
-### 1. Fork and clone the repo
-Fork this repository to your own GitHub account, then clone the fork:
+## Setup
+
 ```bash
 git clone <your-fork-url>
 cd finm_37000_project
-```
-
-Add the main repo as an upstream remote so you can pull in updates:
-```bash
-git remote add upstream https://github.com/marijajov65/finm_37000_project.git
-git fetch upstream
-git merge upstream/main
-```
-
-### 2. Install dependencies
-```bash
 uv sync
 ```
-This creates a `.venv` and installs all dependencies pinned in `uv.lock`, using the Python version specified in `.python-version`.
 
-### 3. Set up environment variables
-Copy the example file and fill in your own Databento API key:
-```bash
-cp .env.example .env
-```
-Then edit `.env`:
-DATABENTO_API_KEY=your_key_here
+Save your Databento API key as a single line in `~/.databento_api_key` (your home directory), with no quotes and no `KEY=` prefix — `src/util.py` reads it from that file, not from `.env`.
 
-### 4. Run the project
+## Running the analysis
+
 ```bash
+# Reproduce the worked-example order-book snapshot above
 uv run src/main.py
-```
 
-### 5. Run tests
-```bash
+# Goal 1: bottom-up P&L and rebate-pivotality pipeline (reproduces the Results table above)
+uv run src/run_pnl_pipeline.py
+uv run src/run_pivotality_inputs.py          # writes results/pivotality/, the grid table above
+uv run src/run_rebate_analysis.py
+
+# Goal 2: front/back/spread relationship and deferred-book validation
+uv run src/run_relationship_analysis.py --full   # fetches and caches the analysis window
+uv run src/run_deferred_validator.py             # reads the cache the previous command warmed
+uv run src/run_strategy_analysis.py
+
+# Tests
 uv run pytest
 ```
 
+First runs against a given day/window fetch from Databento and cache the result in `data_cache/` (git-ignored, since historical market data is metered); re-running the same window afterward is offline and free. Pass `--offline` to any script that supports it to error on a cache miss instead of re-fetching.
+
 ## Contributing
+
 1. Create a branch on your fork for your changes.
 2. Commit and push to your fork.
 3. Open a pull request from your fork into `marijajov65/finm_37000_project` (`main` branch).

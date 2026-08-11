@@ -98,10 +98,25 @@ def divergence_episodes(decomp: pd.DataFrame) -> pd.DataFrame:
     rows = []
     for _, group in div_blocks:
         start_ts = group.index[0]
-        end_ts = group.index[-1]
+        last_div_ts = group.index[-1]
         
+        # Find the integer location of the last divergent tick in the full dataframe
+        loc = decomp.index.get_loc(last_div_ts)
+        
+        # Handle potential duplicate index timestamps safely 
+        if isinstance(loc, slice):
+            loc = loc.stop - 1
+        elif isinstance(loc, np.ndarray):
+            loc = np.where(loc)[0][-1]
+        
+        # The true end of the episode is the NEXT tick where they match again
+        if loc + 1 < len(decomp):
+            true_end_ts = decomp.index[loc + 1]
+        else:
+            true_end_ts = last_div_ts
+            
         # Duration in milliseconds
-        dur_ms = (end_ts - start_ts).total_seconds() * 1000.0 if len(group) > 1 else 0.0
+        dur_ms = (true_end_ts - start_ts).total_seconds() * 1000.0
         
         # Max gap magnitude across the episode
         max_bid_gap = group["bid_gap_ticks"].abs().max()
@@ -109,7 +124,7 @@ def divergence_episodes(decomp: pd.DataFrame) -> pd.DataFrame:
 
         rows.append({
             "start_time": start_ts,
-            "end_time": end_ts,
+            "end_time": true_end_ts,
             "ticks": len(group),
             "duration_ms": dur_ms,
             "max_gap_ticks": max(max_bid_gap, max_ask_gap)
