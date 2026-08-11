@@ -51,6 +51,8 @@ from implied_common import align_books, infer_spread_convention, top_of_book
 from implied_outright import implied_back_book
 from implied_spread import implied_spread_book
 
+from deferred_metrics import divergence_episodes
+
 #: Prices are compared after both books have been snapped to the same tick
 #: grid, so an exact match is exact up to float representation only.
 _PX_TOL = 1e-7
@@ -94,6 +96,9 @@ def compare_books(
     ask_better = imp["ask_px"] < nat["ask_px"] - _PX_TOL
     implied_better = bid_better | ask_better
 
+    bid_nat_better = nat["bid_px"] > imp["bid_px"] + _PX_TOL
+    ask_nat_better = nat["ask_px"] < imp["ask_px"] - _PX_TOL
+
     imp_size = imp["bid_sz"] + imp["ask_sz"]
     nat_size = nat["bid_sz"] + nat["ask_sz"]
     # Size only decides anything when the prices tie; elsewhere it is not a
@@ -101,14 +106,30 @@ def compare_books(
     more = imp_size > nat_size
     less = imp_size < nat_size
 
+    bid_direct_sz = np.where(
+        bid_match,
+        np.maximum(0.0, nat["bid_sz"] - imp["bid_sz"]),
+        np.where(bid_nat_better, nat["bid_sz"], 0.0)
+    )
+    ask_direct_sz = np.where(
+        ask_match,
+        np.maximum(0.0, nat["ask_sz"] - imp["ask_sz"]),
+        np.where(ask_nat_better, nat["ask_sz"], 0.0)
+    )
+
     return pd.DataFrame(
         {
             "same_touch": same_touch,
+            "is_divergent": ~same_touch,
             "implied_better": implied_better,
             "implied_more_size": more.where(same_touch),
             "native_more_size": less.where(same_touch),
             "implied_size": imp_size.where(same_touch),
             "native_size": nat_size.where(same_touch),
+            "dir_bid_sz": bid_direct_sz,
+            "dir_ask_sz": ask_direct_sz,
+            "bid_gap_ticks": (nat["bid_px"] - imp["bid_px"]) / tick,
+            "ask_gap_ticks": (imp["ask_px"] - nat["ask_px"]) / tick,           
             "implied_width_ticks": imp["width"] / tick,
             "native_width_ticks": (nat["ask_px"] - nat["bid_px"]) / tick,
         },
@@ -116,7 +137,7 @@ def compare_books(
     )
 
 
-def summarize(cmp: pd.DataFrame, tick: float) -> dict:
+def summarize(cmp: pd.DataFrame, episodes: pd.DataFrame, tick: float) -> dict:
     """Reduce the per-event frame to the reported statistics.
 
     Percentages are shares of aligned updates, not of wall-clock time: the
@@ -126,6 +147,11 @@ def summarize(cmp: pd.DataFrame, tick: float) -> dict:
     """
     same = cmp["same_touch"]
     n_same = int(same.sum())
+
+    avg_nat_depth = float(cmp["native_size"].mean() / 2.0)
+    avg_imp_depth = float(cmp["implied_size"].mean() / 2.0)
+    avg_dir_depth = float((cmp["dir_bid_sz"] + cmp["dir_ask_sz"]).mean() / 2.0)
+    pct_implied = min(100.0, (avg_imp_depth / avg_nat_depth * 100.0)) if avg_nat_depth > 0 else 0.0
 
     return {
         "updates": len(cmp),
@@ -146,11 +172,25 @@ def summarize(cmp: pd.DataFrame, tick: float) -> dict:
         "avg_native_width_ticks": float(cmp["native_width_ticks"].mean()),
         "avg_implied_width_px": float(cmp["implied_width_ticks"].mean()) * tick,
         "avg_native_width_px": float(cmp["native_width_ticks"].mean()) * tick,
+
+        "avg_nat_depth": avg_nat_depth,
+        "avg_imp_depth": avg_imp_depth,
+        "avg_dir_depth": avg_dir_depth,
+        "pct_implied": pct_implied,
+        "pct_direct": 100.0 - pct_implied,
+        "divergence_count": len(episodes),
+        "avg_divergence_ms": float(episodes["duration_ms"].mean()) if not episodes.empty else 0.0,
+        "max_divergence_ms": float(episodes["duration_ms"].max()) if not episodes.empty else 0.0,
+        "max_gap_ticks": float(episodes["max_gap_ticks"].max()) if not episodes.empty else 0.0,
     }
 
 
 def _print_summary(name: str, stats: dict) -> None:
     tied = 100.0 - stats["implied_more_size_pct"] - stats["native_more_size_pct"]
+
+    validated = stats['same_touch_pct'] >= 90.0 and stats['pct_implied'] >= 50.0
+    status = "VALIDATED" if validated else "WEAK COUPLING"   
+
     print(
         f"  {name}\n"
         f"    moments compared        {stats['updates']:,}"
@@ -167,6 +207,12 @@ def _print_summary(name: str, stats: dict) -> None:
         f" ({stats['avg_implied_width_px']:.4f})"
         f"   real {stats['avg_native_width_ticks']:.2f} ticks"
         f" ({stats['avg_native_width_px']:.4f})"
+        f"    ----------------------------------------------------------------\n"
+        f"    Divergence Episodes     {stats['divergence_count']:,}" 
+        f"    (Avg: {stats['avg_divergence_ms']:.1f}ms, Max: {stats['max_divergence_ms']:.1f}ms, Max Gap: {stats['max_gap_ticks']:.1f} ticks)\n"
+        f"    Liquidity Makeup        {stats['pct_implied']:.1f}% Implied / {stats['pct_direct']:.1f}% Direct\n"
+        f"    Avg Depth Breakdown     Native: {stats['avg_nat_depth']:.1f} | Implied: {stats['avg_imp_depth']:.1f} | Direct: {stats['avg_dir_depth']:.1f}\n"
+        f"    Joint-Book Status       [{status}]\n"  
     )
 
 
@@ -242,12 +288,16 @@ def main() -> None:
         print(f"\n{day} {args.start_utc}-{t1:%H:%M:%S} UTC")
 
         back = implied_back_book(data, spec, legs=legs)
+        back_cmp = compare_books(back, data.back, outright_tick)
+        back_episodes = divergence_episodes(back_cmp)        
         _print_summary(
             f"implied {spec.back_symbol}  <- front + spread",
             summarize(compare_books(back, data.back, outright_tick), outright_tick),
         )
 
         spread = implied_spread_book(data, spec, legs=legs)
+        spread_cmp = compare_books(spread, data.spread, spread_tick)
+        spread_episodes = divergence_episodes(spread_cmp)
         _print_summary(
             f"implied {spec.spread_symbol}  <- front + back",
             summarize(compare_books(spread, data.spread, spread_tick), spread_tick),
