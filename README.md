@@ -4,7 +4,7 @@ Quantifying what it actually costs a market maker to quote the ES calendar sprea
 
 ## Results
 
-Below is a live CME order-book snapshot for ESM6 (front), ESU6 (back), and the ESM6–ESU6 calendar spread, pulled directly from Databento at 2026-06-10 16:00:00 UTC (asks above bids; reproduce with `uv run src/main.py`):
+CME order books for ESM6 (front), ESU6 (back) and the ESM6–ESU6 spread, from Databento at 2026-06-10 16:00 UTC. (asks above bids; reproduce with `uv run src/main.py`):
 
 ```
         ESM6 (front)            ESU6 (back)          ESM6-ESU6 spread
@@ -23,9 +23,9 @@ Below is a live CME order-book snapshot for ESM6 (front), ESU6 (back), and the E
          18    7339.00          13    7399.75          23      60.50   bids
 ```
 
-A trader buying the spread pays the spread ask, 60.75. A market maker taking the other side and flattening immediately by legging out — selling ESM6 at the bid (7340.00) and buying ESU6 at the ask (7401.25) — pays 61.25 points to unwind a position it was paid only 60.75 for: a loss of 0.50 points, or **$25 per contract** at ES's $50/point multiplier.
+A trader buying the spread pays its offer, 60.75, leaving the market maker short. Flattening immediately — selling ESM6 at its bid (7340.00), buying ESU6 at its offer (7401.25) — costs 61.25 points to unwind a position it was paid 60.75 for: a loss of 0.50 points, or **$25 per contract** at ES's $50/point multiplier.
 
-That $25 floor is what the rest of the project tests against real sessions instead of one snapshot. Running the P&L model on two live 5-minute ES sessions (2026-06-09/10, 16:00 UTC, top-of-book, a 50% chance of winning a passive fill, a 5-contract inventory cap before legging out) gives:
+That $25 is the cost of hedging one fill instantly — a floor on what quoting costs, not a forecast of what a desk earns. Turning it into a P&L means replaying real sessions: two 5-minute ES windows (2026-06-09/10, 16:00 UTC), best bid and offer only, a 50% chance of winning any passive fill, a 5-contract inventory cap before legging out:
 
 | Scenario | Passive fee/rebate | Expected net P&L |
 |---|---|---|
@@ -33,7 +33,9 @@ That $25 floor is what the rest of the project tests against real sessions inste
 | Full fee waiver | $0.00 | -$9,931 |
 | Break-even | **-$17.62** | $0 |
 
-A fee waiver alone is not enough — the strategy still loses money at zero fees. Breaking even needs CME to actually pay the market maker about **$17.62 per spread contract** filled, not merely stop charging its own $1.30. Sweeping fill probability (5%–100%) and inventory tolerance (1–50 contracts) across a 6×6 grid puts the required rebate anywhere from **$6.95 to $22.71 per contract**, and it falls sharply as the inventory cap widens — fewer forced legging-outs is a much bigger lever than winning more passive fills:
+The strategy still loses at zero fees, so waiving the fee does not close the gap. Break-even needs CME to pay the maker roughly **$17.62 per spread contract filled** — a genuine rebate, not a discount on the $1.30 it charges today.
+
+Sweeping fill probability (5%–100%) and inventory tolerance (1–50 contracts) across a 6×6 grid puts the required rebate anywhere from **$6.95 to $22.71 per contract**, and it falls sharply as the inventory cap widens — fewer forced legging-outs is a much bigger lever than winning more passive fills:
 
 | p (fill chance) \ cap | 1 | 2 | 5 | 10 | 25 | 50 |
 |---|---|---|---|---|---|---|
@@ -42,9 +44,11 @@ A fee waiver alone is not enough — the strategy still loses money at zero fees
 | 0.50 | 22.69 | 21.37 | 18.98 | 16.97 | 13.81 | 11.71 |
 | 1.00 | **22.71** | 21.49 | 19.17 | 17.01 | 14.09 | 11.86 |
 
-On the deferred-leg side, front and back move almost in lockstep (correlation ≈0.98, contemporaneous, all three sampled sessions), and `deferred ≈ front + spread` fits extremely well as a regression (R² = 0.998–1.000, front coefficient ≈1.00). But the literal quoted touch is a different story: the implied deferred book matches the real ESU6 book's exact bid/ask only **3.5%–35%** of the time across the same three sessions (2026-06-12/15/16) — every one comes back **WEAK COUPLING**. Going the other direction is more striking: implying the spread from front + back produces a synthetic book **10–14 ticks wide** against the real spread market's **~1-tick** width — a roughly ten-times-wider synthetic spread, independently reproducing (from three live sessions three weeks after the snapshot above) the same ~10x tightness advantage the worked example opened with.
+On the deferred-leg side, front and back move almost in lockstep (correlation ≈0.98, contemporaneous, all three sampled sessions), and `deferred ≈ front + spread` fits extremely well as a regression (R² = 0.998–1.000, front coefficient ≈1.00). But the literal quoted touch is a different story: the implied deferred book matches the real ESU6 book's exact bid/ask only **3.5%–35%** of the time across the same three sessions (2026-06-12/15/16), failing the validator's 90% **WEAK COUPLING** threshold every session. The reason is structural: the modeled quote inherits the front leg's width plus the spread's, then rounds outward onto the coarser 0.25 grid — about a tick wider than the real book, too wide to sit on both sides at once.
 
-**Conclusion.** The legging-cost intuition holds up from two independent angles — a single order-book snapshot and a from-scratch book reconstruction three weeks later both put the spread's advantage at roughly 10x. But that cost is a floor, not the outcome: the P&L model shows the tested configuration losing money regardless, and closing the gap needs a real rebate, not just a fee cut. On the quoting side, `front + spread` is a strong *statistical* estimator of the deferred leg's fair value but a poor literal quoting rule — excellent fit in a regression sense, weak tick-for-tick — so a real quoting policy would need to smooth or lag the implied price rather than post it directly. These are five-minute windows on three or four sampled days, not a full backtest — directionally informative, not a final number.
+Running the construction backwards is starker. A spread implied from its two legs is **10–14 spread ticks wide** against a real market quoting **~1 tick**. An implied spread is exactly as wide as its two legs combined, and ES legs trade in quarter-points while the spread trades in nickels. The spread's tightness cannot be rebuilt from its own legs — which rules out quoting it off them, and leaves any maker filled on the spread without a synthetic exit near its own quote.
+
+**Conclusion.** One piece of arithmetic explains both halves of the project: a synthetic quote is as wide as everything it is built from. For the spread that is fatal — its own legs imply a market ten times too wide to compete, so the maker quoting the real thing pays that difference every time it unwinds. That legging cost, not the exchange fee, is what sinks the P&L: the tested configuration loses money even at zero fees, so closing the gap takes a genuine rebate rather than a discount. The sweep points the same way, barely moving with fill probability while falling by half or more as the inventory cap widens — forced unwinding, not lost queue position, is the cost. For the deferred leg the same arithmetic is merely inconvenient: front + spread lands about a tick wider than the book it competes with, enough to estimate fair value and not enough to post a price. All of this rests on five-minute windows across five days: directional, not a backtest.
 
 ## What's built
 
