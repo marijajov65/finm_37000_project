@@ -50,18 +50,6 @@ On the deferred-leg side, front and back move almost in lockstep (correlation �
 
 The project targets **ES only** (ESM6–ESU6); other CME products were dropped from scope to focus on one validated pipeline — see `DEVELOPER_NOTES.md` for the original plan. `legging_cost_calculator.py` and `pnl_calculator.py` replay real order-book and trade data through a fill model (passive-fill probability, inventory cap, CME's fee schedule) into the P&L above; `rebate_pivotality_analyzer.py` and `run_pivotality_inputs.py` solve it for the break-even rebate across a grid. `relationship_analysis.py` fits `deferred ≈ front + spread`; `implied_outright.py`/`implied_spread.py` build the synthetic books and score them against the real ones (`run_deferred_validator.py`, `run_strategy_analysis.py`). Both pipelines run end-to-end against live Databento data and are reproducible from the CLI below — this repository doesn't commit `data_cache/` or `results/`, so re-running refreshes the numbers above against whatever window you point them at.
 
-## What's not there yet
-
-No single interactive application or PDF report generator — each analysis is its own CLI script. Test coverage is solid for the market-data layer and the relationship module but thin on the P&L, rebate, and implied-book modules.
-
-## Future work
-
-- Investigate the touch-match / regression-fit gap on the deferred leg directly — why `deferred ≈ front + spread` fits so well in levels (R² ≈ 1.0) but rarely matches the real book tick-for-tick, and whether a smoothed or lagged implied quote closes it.
-- Backtest the deferred-leg/spread quoting policy itself — not just validate the joint-book assumption — and report its P&L the way the bottom-up model above does for the spread.
-- Widen the sample past a handful of 5-minute windows before treating any of the figures above as more than directional.
-- Extend beyond ES once the pipeline has more mileage on it; `product_specs.json` already carries structural specs for ZN, CL, and 6E.
-- Add unit tests for `pnl_calculator.py`, `rebate_pivotality_analyzer.py`, and the implied-book modules.
-
 ## Prerequisites
 
 - [uv](https://docs.astral.sh/uv/) installed
@@ -99,9 +87,3 @@ uv run pytest
 ```
 
 First runs against a given day/window fetch from Databento and cache the result in `data_cache/` (git-ignored, since historical market data is metered); re-running the same window afterward is offline and free. Pass `--offline` to any script that supports it to error on a cache miss instead of re-fetching.
-
-## Contributing
-
-1. Create a branch on your fork for your changes.
-2. Commit and push to your fork.
-3. Open a pull request from your fork into `marijajov65/finm_37000_project` (`main` branch).
